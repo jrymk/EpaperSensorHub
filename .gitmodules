@@ -1,0 +1,3 @@
+[submodule "lib/GxEPD2_4G"]
+	path = lib/GxEPD2_4G
+	url = https://github.com/jrymk/GxEPD2_4G

@@ -1,0 +1,672 @@
+#include <Arduino.h>
+#include <Wifi.h>
+#include <SD.h>
+#include <FastLED.h>
+#include <Epepd.h>
+#include <EpBuiltInFunctions.h>
+#include <ESP32Time.h>
+#include <Adafruit_SHT31.h>
+#include <SenseairS8.h>
+#include <sstream>
+#include <string>
+#include <iomanip>
+#include <fonts/HarmonyOS_Sans_Medium/HarmonyOS_Sans_Medium8pt7b.h>
+#include <fonts/HarmonyOS_Sans_Medium/HarmonyOS_Sans_Medium16pt7b.h>
+#include <fonts/Aero_Matics_Regular/Aero_Matics_Regular10pt7b.h>
+#include <fonts/Aero_Matics_Bold/Aero_Matics_Bold44pt7b.h>
+#include <fonts/Aero_Matics_Bold/Aero_Matics_Bold22pt7b.h>
+
+#define LED_PIN 5
+#define EPAPER_CS 25
+#define EPAPER_DC 4
+#define EPAPER_RST 13
+#define EPAPER_BUSY 39
+#define CO2_TX 16
+#define CO2_RX 17
+#define SD_CS 27
+#define BTN_PIN 26
+
+
+CRGB leds[1] = {CRGB::Black};
+
+// define RX2 and TX2 to change pins, by default RX2=16 TX2=17
+SenseairS8 co2(2);
+
+EpSSAA4x gfxBuffer(480, 280, 4);
+Epepd epd(EPAPER_CS, EPAPER_DC, EPAPER_RST, EPAPER_BUSY);
+
+Adafruit_SHT31 sht31;
+
+ESP32Time rtc(28800);
+
+long prevSec = 0;
+uint16_t co2Ppm;
+uint16_t sensorStatus;
+bool enableLog = true;
+
+void setup() {
+    FastLED.addLeds<WS2811, LED_PIN, RGB>(leds, 1);
+    FastLED.show();
+
+    Serial.begin(115200);
+    sht31.begin();
+    co2.begin();
+    epd.init();
+
+    EpPlacement placement(0, 0, 0);
+
+    gfxBuffer.allocate(4096);
+
+    if (!SD.begin(SD_CS)) {
+        Serial.println("SD card initialization failed");
+    }
+    else {
+        Serial.println("SD card initialised");
+    }
+    Serial.print("Card size:  ");
+    Serial.println((float) SD.cardSize() / 1000);
+
+    Serial.print("Total bytes: ");
+    Serial.println(SD.totalBytes());
+
+    Serial.print("Used bytes: ");
+    Serial.println(SD.usedBytes());
+
+    File wifiCredentials = SD.open("/config.txt", FILE_READ);
+    char ssid[128], password[128];
+    if (wifiCredentials) {
+        std::stringstream ss(wifiCredentials.readString().c_str());
+
+        sscanf(ss.str().c_str(), "wifi.ssid =  %s\nwifi.password = %s\n", &ssid, &password);
+
+        wifiCredentials.close();
+        Serial.printf("SSID: %s\nPassword: %s\n", ssid, password);
+    }
+    else {
+        Serial.println("Error opening config.txt");
+    }
+    // shapes           took 291697us
+    // bitmap           took 264706us
+    // bitmap itself    took 108941us
+    // intersect        took 356548us
+    // intersect itself took 200789us
+    // conclusion: redRam.setPixel and bwRam.setPixel took 150ms
+    //
+    // bitmap stream    took 129264us
+    //  with fast mod   took 128689us
+    // conclusion: streaming bytes takes off a ton of time
+    //
+    // bitmap forced power of 2 blocks took 124245us
+    // without std::function took 82504us
+
+
+//    { /// PARTIAL TEST
+//        gfxBuffer.setTransparencyPattern();
+//        gfxBuffer.setBitmapShapeBlendMode(EpBitmap::BITMAP_ADD_SHAPES);
+//
+//        EpPartialDisplay partialDisplay(epd);
+//
+//        EpBitmap mask(480, 280, 1);
+//        mask.setBitmapShapeBlendMode(EpBitmap::SHAPES_ONLY);
+//        mask.setRectangle(20, 30, 240, 380, 0xFF);
+//
+//        gfxBuffer.fillScreen(GFX_WHITE);
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DisplayMode::DU2); // fill screen black
+//        gfxBuffer.fillScreen(GFX_BLACK);
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DisplayMode::DU2); // fill screen black
+//        delay(1000);
+//
+//        gfxBuffer.fillScreen(GFX_WHITE);
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DisplayMode::A2, &mask);
+//        delay(1000);
+//
+//        gfxBuffer.setTextColor(GFX_BLACK);
+//        gfxBuffer.setFont(&HarmonyOS_Sans_Medium16pt7b);
+//        gfxBuffer.setCursor(10, 100);
+//        gfxBuffer.print("Connecting to WiFi...");
+////        epd.display();
+//
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DisplayMode::A2, &mask);
+//        delay(1000);
+//
+//        gfxBuffer.setRectangle(80, 65, 160, 200, 0xFF, EpShape::ADD);
+//        gfxBuffer.setCircle(200, 140, 120, 0xFF, EpShape::SUBTRACT);
+////        epd.display();
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DisplayMode::A2, &mask);
+//        delay(1000);
+//
+//        Serial.println("sleeping\n");
+//        epd.powerOff();
+//        Serial.println("slept\n");
+//        delay(1000);
+//        Serial.println("waking\n");
+//        epd.powerOn();
+//        Serial.println("woke\n");
+//
+//        gfxBuffer.setBitmapShapeBlendMode(EpBitmap::BITMAP_INTERSECT_SHAPES);
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DisplayMode::GC2_FULL);
+//    }
+
+//    { /// FUNCTION BENCHMARK
+//        uint8_t sum = 0;
+//        uint64_t start = esp_timer_get_time();
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            sum += gfxBuffer.getPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH);
+//        }
+//        Serial.printf("%lld gfxBuffer.getPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//
+//        start = esp_timer_get_time();
+//        auto ram = epd.getBwRam();
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            sum += ram->getPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH);
+//        }
+//        Serial.printf("%lld epepd.getBwRam()->getPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//
+//        start = esp_timer_get_time();
+//        for (int16_t y = 0; y < epd.EPD_HEIGHT; y++)
+//            for (int16_t x = 0; x < epd.EPD_HEIGHT; x += 8)
+//                sum += ram->_get8MonoPixels(x, y);
+//        Serial.printf("%lld epepd.getBwRam()->get8MonoPixels calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH / 8, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH / 8));
+//
+//        start = esp_timer_get_time();
+//        for (int16_t y = 0; y < epd.EPD_HEIGHT; y++)
+//            for (int16_t x = 0; x < epd.EPD_HEIGHT; x += 8)
+//                ram->_set8MonoPixels(x, y, sum);
+//        Serial.printf("%lld epepd.getBwRam()->set8MonoPixels calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH / 8, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH / 8));
+//
+//        start = esp_timer_get_time();
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            gfxBuffer.drawPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH, GFX_WHITE);
+//        }
+//        Serial.printf("%lld gfxBuffer.drawPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//
+//        start = esp_timer_get_time();
+//        GFXcanvas1 canvas1(280, 480);
+//        start = esp_timer_get_time();
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            sum += canvas1.getPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH);
+//        }
+//        Serial.printf("%lld GFXcanvas1.getPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            canvas1.drawPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH, sum);
+//        }
+//        Serial.printf("%lld GFXcanvas1.drawPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//
+//        start = esp_timer_get_time();
+//        GFXcanvas8 canvas8(280, 480); // THAT IS A LOT OF MEMORY (continuous too...)
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            sum += canvas8.getPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH);
+//        }
+//        Serial.printf("%lld GFXcanvas8.getPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//        for (int32_t cnt = 0; cnt < uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH; cnt++) {
+//            canvas8.drawPixel(cnt % epd.EPD_WIDTH, cnt / epd.EPD_WIDTH, sum);
+//        }
+//        Serial.printf("%lld GFXcanvas8.drawPixel calls took %lldus, %fus/call\n", uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH, esp_timer_get_time() - start,
+//                      float(esp_timer_get_time() - start) / (uint32_t(epd.EPD_HEIGHT) * epd.EPD_WIDTH));
+//    }
+    { /// GREYSCALE TEST
+        EpPartialDisplay partialDisplay(epd);
+        uint64_t start = esp_timer_get_time();
+
+        int depth = 6;
+        for (int bit = 1; bit <= depth; bit++) {
+            for (int seg = 0; seg < (1 << bit); seg++) {
+                uint16_t colorCode = 0;
+                for (int shift = 8 - bit; shift >= 0; shift -= bit)
+                    colorCode |= seg << shift;
+                colorCode = ((colorCode & 0b11111000) << 8) | ((colorCode & 0b11111100) << 3) | ((colorCode & 0b11111000) >> 3);
+                gfxBuffer.fillRect((bit - 1) * (270 / depth), seg * (192 / (1 << bit)), 270 / depth, 192 / (1 << bit), colorCode);
+                gfxBuffer.drawLine((bit - 1) * (270 / depth), seg * (192 / (1 << bit)), (bit - 1) * (270 / depth) + (270 / depth / 4), seg * (192 / (1 << bit)),
+                                   GFX_WHITE);
+                gfxBuffer.drawLine((bit - 1) * (270 / depth) + (270 * 3 / depth / 4), seg * (192 / (1 << bit)), (bit - 1) * (270 / depth) + (270 / depth),
+                                   seg * (192 / (1 << bit)),
+                                   GFX_BLACK);
+
+                Serial.printf("%d\n", EpBitmap::getLuminance(colorCode));
+            }
+        }
+
+        EpGreyscaleDisplay greyscaleDisplay(epd);
+        // draw overlay text
+        gfxBuffer.setBitmapShapeBlendMode(EpBitmap::BITMAP_ADD_SHAPES);
+        EpBitmapMono textOverlay(96, 20);
+        textOverlay.allocate();
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setFont(&HarmonyOS_Sans_Medium8pt7b);
+        textOverlay.setCursor(5, 16);
+        textOverlay.setTextColor(GFX_BLACK);
+        textOverlay.print("GC16_FAST");
+        EpPlacement textPlacement(19, 0, 3);
+        gfxBuffer.setRectangle(0, 0, 20, 100, &textOverlay, textPlacement, EpShape::ADD);
+        delay(2000);
+        greyscaleDisplay.display(&gfxBuffer, placement, EpGreyscaleDisplay::GC16_FAST);
+        delay(1000);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC4");
+        delay(2000);
+        greyscaleDisplay.display(&gfxBuffer, placement, EpGreyscaleDisplay::GC4);
+        delay(1000);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC16");
+        delay(2000);
+        greyscaleDisplay.display(&gfxBuffer, placement, EpGreyscaleDisplay::GC16);
+        delay(1000);
+
+        EpPlacement placement(279, 0, 3);
+        textPlacement = EpPlacement(0, 259, 0);
+        gfxBuffer.clearShapes();
+        gfxBuffer.setRectangle(0, 259, 100, 20, &textOverlay, textPlacement, EpShape::ADD);
+        gfxBuffer.drawRGBBitmap(0, 0, miomiosan, 480, 280);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC16_FAST");
+        greyscaleDisplay.display(&gfxBuffer, placement, EpGreyscaleDisplay::GC16_FAST);
+        delay(2000);
+        EpIntegerScaling ssaa(&gfxBuffer, 2);
+        greyscaleDisplay.display(&ssaa, placement, EpGreyscaleDisplay::GC16_FAST);
+        delay(1000);
+        ssaa.setScale(3);
+        greyscaleDisplay.display(&ssaa, placement, EpGreyscaleDisplay::GC16_FAST);
+        delay(1000);
+        ssaa.setScale(-2);
+        greyscaleDisplay.display(&ssaa, placement, EpGreyscaleDisplay::GC16_FAST);
+        delay(1000);
+        ssaa.setScale(-3);
+        greyscaleDisplay.display(&ssaa, placement, EpGreyscaleDisplay::GC16_FAST);
+        delay(1000);
+
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC4");
+        delay(2000);
+        greyscaleDisplay.display(&gfxBuffer, placement, EpGreyscaleDisplay::GC4);
+        delay(1000);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC16");
+        delay(2000);
+        greyscaleDisplay.display(&gfxBuffer, placement, EpGreyscaleDisplay::GC16);
+        delay(2000);
+
+
+        gfxBuffer.fillScreen(GFX_BLACK);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC2_FULL");
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::GC2_FULL);
+        delay(1000);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("GC2_PARTIAL");
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::GC2_PARTIAL);
+        delay(1000);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("A2");
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::A2);
+        delay(1000);
+        textOverlay.fillScreen(GFX_WHITE);
+        textOverlay.setCursor(5, 16);
+        textOverlay.print("DU2");
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::DU2);
+        delay(1000);
+
+        gfxBuffer.setBitmapShapeBlendMode(EpBitmap::BITMAP_ONLY);
+    }
+    delay(10000);
+    { /// PARTIAL TEST
+        EpPlacement placement(0, 0, 0);
+        EpBitmapMono updateMask(280, 480); // drop down menu frame
+//        updateMask.allocate();
+//        updateMask.fillRect(10, 40, 200, 400, GFX_WHITE);
+        updateMask.setBitmapShapeBlendMode(EpBitmap::SHAPES_ONLY);
+        updateMask.setRectangle(10, 40, 200, 400, 0xFF, EpShape::ADD);
+
+        const char* str[20] = { // source: Clion File menu
+                "New",
+                "Open...",
+                "Recent Projects",
+                "Close Project",
+                "Remote development...",
+                "Settings...",
+                "Reload CMake Project",
+                "File Properties",
+                "Local History",
+                "Save All",
+                "Reload All from Disk",
+                "Repair IDE",
+                "Invalidate Caches...",
+                "Manage IDE Settings",
+                "New Projects Setup",
+                "Save File as Template...",
+                "Export",
+                "Print...",
+                "Power Save Mode",
+                "Exit"
+        };
+        const int margin = 2, itemHeight = 18;
+
+        int highlightedItem = 0;
+        int previousHighlightedItem = 0;
+
+        gfxBuffer.setFont(&HarmonyOS_Sans_Medium8pt7b);
+
+        EpPartialDisplay partialDisplay(epd);
+
+        gfxBuffer.fillRect(10, 40, 200, 400, GFX_WHITE);
+        // draw menu (initial frame)
+        for (int i = 0; i < 20; i++) {
+            gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin, GFX_WHITE);
+            gfxBuffer.setTextColor(GFX_BLACK);
+            gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+            gfxBuffer.print(str[i]);
+        }
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::A2, &updateMask, &updateMask, nullptr);
+
+        for (int f = 0; f < 20; f++) {
+            highlightedItem = f;
+            // clear previous
+            gfxBuffer.gfxUpdatedRegion.reset();
+            int i = previousHighlightedItem;
+            gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin, GFX_WHITE);
+            gfxBuffer.setTextColor(GFX_BLACK);
+            gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+            gfxBuffer.print(str[i]);
+            // highlight current
+            i = highlightedItem;
+            gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin, GFX_BLACK);
+            gfxBuffer.setTextColor(GFX_WHITE);
+            gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+            gfxBuffer.print(str[i]);
+            // display (with windowed update)
+            partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::A2, &updateMask, nullptr, &gfxBuffer.gfxUpdatedRegion);
+
+            previousHighlightedItem = highlightedItem;
+        }
+        // A2 wipe
+        gfxBuffer.fillRect(10, 40, 200, 400, GFX_WHITE);
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::A2, &updateMask, &updateMask); // force? idk
+
+        // show final image
+        for (int i = 0; i < 20; i++) {
+            const int margin = 2, itemHeight = 18;
+            gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin,
+                               (highlightedItem == i) ? GFX_BLACK : GFX_WHITE);
+            gfxBuffer.setTextColor((highlightedItem == i) ? GFX_WHITE : GFX_BLACK);
+            gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+            gfxBuffer.print(str[i]);
+        }
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::GC2_PARTIAL, &updateMask, &updateMask);
+        delay(500);
+
+        // start fast animation
+        for (int f = 0; f < 16; f++) {
+            highlightedItem = 19 - f;
+
+            for (int i = 0; i < 20; i++) {
+                const int margin = 2, itemHeight = 18;
+                gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin,
+                                   (highlightedItem == i) ? GFX_BLACK : GFX_WHITE);
+                gfxBuffer.setTextColor((highlightedItem == i) ? GFX_WHITE : GFX_BLACK);
+                gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+                gfxBuffer.print(str[i]);
+            }
+            partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::A2, &updateMask, nullptr);
+
+//            delay(150);
+        }
+        // A2 wipe
+        gfxBuffer.fillRect(10, 40, 200, 400, GFX_WHITE);
+//        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::A2, &updateMask, &updateMask); // force? idk
+
+        // show final image
+        for (int i = 0; i < 20; i++) {
+            const int margin = 2, itemHeight = 18;
+            gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin,
+                               (highlightedItem == i) ? GFX_BLACK : GFX_WHITE);
+            gfxBuffer.setTextColor((highlightedItem == i) ? GFX_WHITE : GFX_BLACK);
+            gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+            gfxBuffer.print(str[i]);
+        }
+        partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::GC2_PARTIAL, &updateMask, &updateMask);
+        delay(500);
+
+        //
+//
+//        for (int f = 0; f < 20; f++) {
+//            highlightedItem = f;
+//
+//            for (int i = 0; i < 20; i++) {
+//                const int margin = 2, itemHeight = 18;
+//                gfxBuffer.fillRect(10 + margin, 40 + margin + itemHeight * i, 200 - 2 * margin, itemHeight - 2 * margin,
+//                                   (highlightedItem == i) ? GFX_BLACK : GFX_WHITE);
+//                gfxBuffer.setTextColor((highlightedItem == i) ? GFX_WHITE : GFX_BLACK);
+//                gfxBuffer.setCursor(10 + margin + 4, 40 + margin + itemHeight * i + 11);
+//                gfxBuffer.print(str[i]);
+//            }
+//            partialDisplay.display(&gfxBuffer, placement, EpPartialDisplay::GC2_PARTIAL, &updateMask, (f == 0) ? &updateMask : nullptr);
+//
+////            delay(400);
+//        }
+
+
+    }
+
+    epd.powerOff();
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to WiFi ..");
+    while (WiFi.status() != WL_CONNECTED) {
+        Serial.print('.');
+        delay(1000);
+    }
+    Serial.println(WiFi.localIP());
+
+    sht31.heater(false);
+    Serial.print("is sht31 heater enabled: ");
+    Serial.print(sht31.isHeaterEnabled());
+    Serial.print("\n");
+
+//    {
+//        int16_t tbx, tby;
+//        uint16_t tbw, tbh;
+//        display.setCursor(0, 35);
+//        display.print("Getting time from time.windows.com");
+//        display.display(true);
+//    }
+
+    configTime(0, 0, "time.windows.com");
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+        rtc.setTimeStruct(timeinfo);
+    }
+    Serial.println(rtc.getDateTime(true));
+
+//    display.fillScreen(GxEPD_WHITE);
+//    display.display(false);
+//    delay(1000);
+
+//    delay(1000);
+//    display.powerOff();
+
+//    Serial.printf("Test\n");
+//    display.fillRect(0, 0, 100, 128, GxEPD_WHITE);
+//    display.fillRect(100, 0, 100, 128, GxEPD_LIGHTGREY);
+//    display.fillRect(200, 0, 100, 128, GxEPD_DARKGREY);
+//    display.fillRect(300, 0, 100, 128, GxEPD_GFX_BLACK);
+//    display.display(false);
+//
+//    display.setFont(&Aero_Matics_Bold44pt7b);
+//    display.setTextColor(GxEPD_GFX_BLACK);
+//    std::stringstream ss;
+//    ss << std::setfill('0') << std::setw(2) << rtc.getHour(true) << ":" << std::setfill('0') << std::setw(2) << rtc.getMinute();
+//    display.setCursor(5, 128);
+//    display.print(ss.str().c_str());
+//    display.display(true);
+//
+//
+    Serial.printf("done\n");
+
+    delay(1000);
+}
+
+void loop() {
+    if (rtc.getLocalEpoch() >= prevSec + 1) {
+        prevSec = rtc.getLocalEpoch();
+
+        // EVERY SECOND
+//        display.
+//        display.init(false);
+////        display.setPartialWindow(0, 0, 300, 128);
+//        display.firstPage();
+
+//        {
+//            display.fillScreen(GxEPD_WHITE);
+//            display.setTextColor(GxEPD_GFX_BLACK);
+//            display.setFont(&Aero_Matics_Regular10pt7b);
+//            display.setCursor(5, 22);
+//            display.print(rtc.getDate(false));
+//        }
+//        int16_t tbx, tby;
+//        uint16_t tbw, tbh;
+//        {
+//            display.setFont(&Aero_Matics_Bold44pt7b);
+//            std::stringstream ss;
+//            ss << std::setfill('0') << std::setw(2) << rtc.getHour(true) << ":" << std::setfill('0') << std::setw(2) << rtc.getMinute();
+//            display.setCursor(5, 93);
+//            display.print(ss.str().c_str());
+//            display.getTextBounds(ss.str().c_str(), 10, 91, &tbx, &tby, &tbw, &tbh);
+//        }
+//
+//        display.setTextColor(GxEPD_DARKGREY);
+//        {
+//            display.setFont(&Aero_Matics_Bold20pt7b);
+//            std::stringstream ss;
+//            ss << std::setfill('0') << std::setw(2) << rtc.getSecond();
+//            display.setCursor(tbw + 15, 93);
+//            display.print(ss.str().c_str());
+//        }
+//        {
+//            display.setFont(&Aero_Matics_Regular10pt7b);
+//            display.setCursor(5, 120);
+//            std::stringstream ss;
+//            ss << sht31.readTemperature() << "°C";
+//            display.print((ss.str().c_str()));
+//        }
+//        {
+//            display.setFont(&Aero_Matics_Regular10pt7b);
+//            display.setCursor(70, 120);
+//            std::stringstream ss;
+//            ss << sht31.readHumidity() << "%";
+//            display.print((ss.str().c_str()));
+//        }
+//        {
+//            display.setFont(&Aero_Matics_Regular10pt7b);
+//            display.setCursor(143, 120);
+//            std::stringstream ss;
+//            ss << "CO2: " << co2Ppm << "ppm";
+//            display.print((ss.str().c_str()));
+//        }
+//        if (enableLog) {
+//            display.fillCircle(285, 99, 12, GxEPD_LIGHTGREY);
+//            display.fillRect(285, 87, 11, 25, GxEPD_LIGHTGREY);
+//            display.fillCircle(285, 99, 6, (rtc.getSecond() % 2 == 0) ? GxEPD_WHITE : GxEPD_LIGHTGREY);
+//        }
+//        disableCore0WDT()
+////        display.display(true);
+////        display.display(true);
+//        display.displayWindow(48, 48, 96, 96);
+
+//        display.powerOff();
+
+        Serial.print(co2Ppm);
+        Serial.print("\t");
+
+        float t = sht31.readTemperature();
+        float h = sht31.readHumidity();
+
+        if (!isnan(t)) {
+            Serial.print(t);
+            Serial.print("\t");
+        }
+        else {
+            Serial.println("Failed to read temperature");
+        }
+
+        if (!isnan(h)) {
+            Serial.println(h);
+        }
+        else {
+            Serial.println("Failed to read humidity");
+        }
+
+        if (enableLog && co2Ppm != 0) {
+            File logFile = SD.open("/log.txt", FILE_APPEND);
+            logFile.printf("%ld\t%d\t%.2f\t%.2f\n", rtc.getEpoch(), co2Ppm, t, h);
+            logFile.close();
+        }
+
+        if (prevSec % 4 == 0) {
+            // EVERY FOUR SECONDS
+            SenseairS8::SensorStatus status = co2.readSensorStatus();
+            co2Ppm = status.co2;
+
+            // There's a bug in co2Sensor.available(), it won't return the right number of bytes the first time it's called :-/
+        }
+
+//        if (prevSec % 60 == 0 && prevSec % 600 != 0) {
+//            co2.printSensorInfo();
+//            display.fillRect(0, 105, display.width(), display.height() - 105, GxEPD_GFX_BLACK);
+//            display.display(true);
+//            display.fillRect(0, 105, display.width(), display.height() - 105, GxEPD_WHITE);
+//            display.display(true);
+//            display.fillRect(0, 105, display.width(), display.height() - 105, GxEPD_GFX_BLACK);
+//            display.display(true);
+//            display.fillRect(0, 105, display.width(), display.height() - 105, GxEPD_WHITE);
+//            display.display(true);
+//        }
+//        if (prevSec % 600 == 0) {
+//            display.fillScreen(GxEPD_GFX_BLACK);
+//            display.display(true);
+//            display.fillScreen(GxEPD_WHITE);
+//            display.display(true);
+//            display.fillScreen(GxEPD_GFX_BLACK);
+//            display.display(true);
+//            display.fillScreen(GxEPD_WHITE);
+//            display.display(true);
+//        }
+    }
+
+    /*if (digitalRead(INC_BTN) == 0)
+    {
+      display.setRotation(3);
+    }
+    if (digitalRead(DEC_BTN) == 0)
+    {
+      display.setRotation(1);
+    }
+    if (digitalRead(SEL_BTN) == 0)
+    {
+      display.fillScreen(GxEPD_WHITE);
+      display.display(true);
+      display.fillScreen(GxEPD_GFX_BLACK);
+      display.display(true);
+      display.fillScreen(GxEPD_WHITE);
+      display.display(true);
+      display.fillScreen(GxEPD_GFX_BLACK);
+      display.display(true);
+    }*/
+
+    delay(100);
+}

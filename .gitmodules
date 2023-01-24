@@ -1,3 +1,6 @@
-[submodule "lib/GxEPD2_4G"]
-	path = lib/GxEPD2_4G
-	url = https://github.com/jrymk/GxEPD2_4G
+[submodule "lib/epepd"]
+	path = lib/epepd
+	url = https://github.com/jrymk/epepd
+[submodule "lib/SenseairS8"]
+	path = lib/SenseairS8
+	url = https://github.com/jrymk/SenseairS8

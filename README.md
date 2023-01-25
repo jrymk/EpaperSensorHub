@@ -1,6 +1,9 @@
 # pdtvtPaper
 
 ## Features
+### DIYable
+Those parallel interface E-ink displays have way better specs and costs cheaper. However they require additional hardware to create the driving voltages, which require a custom PCB and SMD soldering. This project (at least for the development hardware) does not require any special tools or custom PCB. *Those display are really tempting though...*
+
 ### NDIR CO2 sensor warns you if the CO2 concentration levels are too high
 High CO2 levels can cause drowsiness, tiredness, and decreases productivity.
 
